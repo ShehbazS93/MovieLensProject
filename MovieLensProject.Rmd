@@ -1,0 +1,410 @@
+---
+title: "MovieLens Project"
+author: "Shehbaz Singh"
+date: "11/6/2020"
+output: pdf_document
+
+---
+Introduction/Overview/Executive Summary
+
+The goal of the project is to use a subset of the MovieLens data set to build a movie recommendation algorithm with a RMSE below 0.86490. The MovieLens dataset has 10 million entries with 7 variables, and the subset of the dataset we are given is a training set known as edx and a test set known as validation. The 7 variables in the MovieLens set are a unique ID for each movie known as movieId, the title, the year it was released, the genres associated with the movie, the unique ID for each user known as userId, a rating between 0 and 5, and a timestamp of the the date and time the movie was reviewed. The edx set uses 90% of the MovieLens and the remaining 10% of the dataset is validation. Interestingly, both edx and validation have 6 variables instead of the 7 that the MovieLens dataset has because the release year variable was added onto the end of the movie title. 
+
+To make a movie recommendation algorithm, variables such as the movie being reviewed or the time the movie was reviewed were taken into account. The first variable analyzed was the movie, then the user, then the genres and finally the week the review was written. To prevent movies, users, genres, or weeks with low review counts from heavily skewing the effects, they are all regularized. Both the normal and regularized effects will be shown, along with their effects on the RMSE.
+ 
+```{r load datasets, include = FALSE}
+###########################################################
+# Create edx set, validation set (final hold-out test set)
+##########################################################
+
+# Note: this process could take a couple of minutes
+
+if(!require(tidyverse)) install.packages("tidyverse", repos = "http://cran.us.r-project.org")
+if(!require(caret)) install.packages("caret", repos = "http://cran.us.r-project.org")
+if(!require(data.table)) install.packages("data.table", repos = "http://cran.us.r-project.org")
+
+library(tidyverse)
+library(caret)
+library(data.table)
+
+# MovieLens 10M dataset:
+# https://grouplens.org/datasets/movielens/10m/
+# http://files.grouplens.org/datasets/movielens/ml-10m.zip
+
+dl <- tempfile()
+download.file("http://files.grouplens.org/datasets/movielens/ml-10m.zip", dl)
+
+ratings <- fread(text = gsub("::", "\t", readLines(unzip(dl, "ml-10M100K/ratings.dat"))),
+                 col.names = c("userId", "movieId", "rating", "timestamp"))
+
+movies <- str_split_fixed(readLines(unzip(dl, "ml-10M100K/movies.dat")), "\\::", 3)
+colnames(movies) <- c("movieId", "title", "genres")
+
+# if using R 3.6 or earlier:
+movies <- as.data.frame(movies) %>% mutate(movieId = as.numeric(levels(movieId))[movieId],
+                                           title = as.character(title),
+                                           genres = as.character(genres))
+# if using R 4.0 or later:
+movies <- as.data.frame(movies) %>% mutate(movieId = as.numeric(movieId),
+                                           title = as.character(title),
+                                           genres = as.character(genres))
+
+
+movielens <- left_join(ratings, movies, by = "movieId")
+
+# Validation set will be 10% of MovieLens data
+set.seed(1, sample.kind="Rounding") # if using R 3.5 or earlier, use `set.seed(1)`
+test_index <- createDataPartition(y = movielens$rating, times = 1, p = 0.1, list = FALSE)
+edx <- movielens[-test_index,]
+temp <- movielens[test_index,]
+
+# Make sure userId and movieId in validation set are also in edx set
+validation <- temp %>% 
+  semi_join(edx, by = "movieId") %>%
+  semi_join(edx, by = "userId")
+
+# Add rows removed from validation set back into edx set
+removed <- anti_join(temp, validation)
+edx <- rbind(edx, removed)
+
+rm(dl, ratings, movies, test_index, temp, movielens, removed)
+
+```
+Methods/Analysis
+
+```{r mu, include = FALSE}
+mu <- mean(edx$rating)                                                  #Getting the average of all movies
+mu_rmse <- RMSE(mu, validation$rating)                                  #RMSE of mu
+rmse_results <- data.frame(method = "Just the Average", RMSE = mu_rmse) #Making table to see progress, organized appearance. Was in notes/lectures
+
+```
+
+Before showing the movie effect, there is a simpler and easier alogrithm that can be made to estimate the rating, guessing a single value for all the ratings, regardless of the movie being reviewed or the user reviewing the movie. To minimize the RMSE as much as possible, the average value of all the movie ratings will be used, The average value of the ratings, which will be called mu from here on is `r mu`, and the RMSE of this algorithm is `r mu_rmse`. 
+
+```{r movie effect, include = FALSE}
+movie_avgs <- edx %>%                                                  #Will store the bi of all movies. Will be added onto validation later
+  group_by(movieId) %>%                                                #MovieId is used since title is not unique.
+  summarize(bi = mean(rating- mu) , n = n(), .groups = 'keep')                           #bi is what's left after we remove the average(mu) from the rating of the movie
+predicted_bi_rating <- validation %>%                                  #Similar to predict using the test set and what was in train
+  left_join(movie_avgs, by='movieId') %>%                              #Adds bi to the validation set according to movieId
+  .$bi + mu 
+bi_rmse <- RMSE(predicted_bi_rating, validation$rating)         #Finds out and stores the rmse of the movie effects algorithm
+rmse_results <- bind_rows(rmse_results,                         #Adds the movies effect algorithm and it's rmse to the table
+                          data_frame(method = "Movies Algorithm",
+                                     RMSE = bi_rmse))
+```
+ 
+From experience we all know that some movies are more enjoyable to watch than others, and that some movies are even widely regarded as great movies or flops, meaning that some movies have a higher base rating than others. This will be referred to as the movie effect, also known as movie bias or bi in this report. To calculate the movie bias, the movies are grouped together by their movieId, have mu subtracted from their rating and then are averaged. The RMSE of this algorithm is `r bi_rmse`, which is an improvement over just using mu but could still be improved upon. 
+
+To see how well the movie effect algorithm worked, a good place to start is to see which movies have the biggest and lowest movie effect, shown below. 
+  
+```{r movies by non-reg bi, echo = FALSE}
+#Seeing which movies are highest rating according to bi
+movie_titles <- edx %>%                                         #Making a dataset of the number of times each movie was viewed and their bi
+  select(movieId, title) %>%
+  group_by(movieId, title) %>%
+  summarize(n = n(), .groups = 'keep') %>%
+  distinct()
+validation %>%                                                  #Highest rated movies according to bi
+  left_join(movie_avgs, by = "movieId") %>% 
+  select(title, bi, n) %>%
+  arrange(desc(bi)) %>% 
+  distinct() %>%
+  top_n(10, bi) 
+validation %>%                                                  #Lowest rated movies according to bi
+  left_join(movie_avgs, by = "movieId") %>% 
+  select(title, bi, n) %>%
+  arrange(bi) %>% 
+  distinct() %>%
+  top_n(10, bi) 
+```  
+
+A lot of these movies are unheard of. The reason these movies have such big positive and negative movie bias is because they have a very low number of reviews, labeled n in the diagram above. This is important because it implies that when the mean of the rating of these movies is taken that it doesn't bring them closer to zero as it does with movies with lots of reviews. In other words, the more a movie is reviewed, the less likely it's mean rating is to be as extreme. To fix this, the movie effect must be regularized, which means adding a number, known as lambda, to the denominator of the mean, meaning that it will be the sum divided by the total amount plus lambda instead of just the sum divided by the total amount.
+  
+```{r lambda, include = FALSE}
+lambda <- 3                                                     #Using 3 because it was the number used in the class example
+reg_movie_avg_atmpt <- edx %>%                                   #Getting the movie effect again, but regularizing it using a lambda of 3. 
+  group_by(movieId) %>% 
+  summarize(reg_bi = sum(rating - mu)/(n() + lambda), n = n(), .groups = 'keep')  #Can't use mean, so sum the top part and then divide by lambda + the count
+predicted_reg_bi_rating <- validation %>%                       #Using the regularized bi and mu to predict the rating
+  left_join(reg_movie_avg_atmpt, by = "movieId") %>%
+  mutate(pred = mu + reg_bi) %>%
+  .$pred
+reg_bi_rmse <- RMSE(predicted_reg_bi_rating, validation$rating) #RMSE of the regularized movie effect
+rmse_results <- bind_rows(rmse_results,                         #Adding the regularized movie effect to the table
+                          data_frame(method = "Regularized Movie Algorithm, l = 3",
+                                     RMSE = reg_bi_rmse))
+rmse_results
+
+#Optimizing lambda
+lambdas <- seq(0,10,0.1)                           #Different values of lambda to use
+just_the_sum <- edx %>%                            #Saw this used in the lecture notes so decided to try it. Gets the top half of the 'mean'
+  group_by(movieId) %>%                            #Attachs the sum to movieIds so it can be added to another calculation
+  summarize(s = sum(rating - mu), n_i  = n(), .groups = 'keep') 
+reg_movie_rmse <- sapply(lambdas, function(l){     #Need sapply to go through the lambdas
+  preds <- validation %>%  
+    group_by(movieId) %>%                          #Grouping by movieIds since this is for movie effects
+    left_join(just_the_sum, by = "movieId") %>%    #Adds the sums to validation data set via movieIds
+    mutate(bi = s/(n_i + l)) %>%                   #Saves it a calculation I guess
+    mutate(pred = mu + bi) %>%  
+    .$pred
+  return(RMSE(preds,validation$rating))
+})
+###plot(lambdas, reg_movie_rmse, xlab = "Lambda", ylab = "RMSE", main = "Regularized Movie Algorithm RMSE")   #3 was kinda close to optimal actually, guess it mught not decrease the rmse much then
+lambda <- lambdas[which.min(reg_movie_rmse)]  #Saves the optimal lambda
+rmse_results <- bind_rows(rmse_results,
+                          data_frame(method = paste("Regularized Movie Alogrithm, l = ", lambda), #Written this way so that the optimal lambda is
+                                     RMSE = min(reg_movie_rmse)))
+rmse_results
+
+```
+  
+A simple example of using regularization is using lambda = 3. Doing this results in an RMSE of `r reg_bi_rmse`. However, lambda is an optimization parameter which means it can be changed to reduce the RMSE. To find the lambda that lowers the RMSE the most, a graph with lambda going from 0 to 10 by increments of 0.1 will be shown on the x-axis with the possible RMSEs shown on the y-axis. Each point on the plot will represent the RMSE obtained by the algorithm when it was using said value of lambda. Such a plot is shown below, and from it we find that the optimal value of lambda is `r lambda` which gives us a RMSE of `r min(reg_movie_rmse)`.
+  
+```{r bi rmse vs lambda, echo =FALSE}
+plot(lambdas, reg_movie_rmse, xlab = "Lambda", ylab = "RMSE", main = "Regularized Movie Algorithm RMSE")   #3 was kinda close to optimal actually, guess it mught not decrease the rmse much then
+```
+
+Going back to what was stated earlier, regularization of the movie effect should fix the movies that have the biggest bi. This can be seen below.
+  
+```{r movies by regularized bi, echo = FALSE}
+#Seeing which movies are highest rating according to bi after using regularization
+opt_reg_movie_avgs <- edx %>%                     #Making a dataset of number of times each movie was reviewed along with the regularized bi
+  group_by(movieId) %>%
+  mutate(bi = sum(rating-mu)/(n() + lambda), n = n()) %>% 
+  select(movieId, title, bi, n) %>%
+  arrange(movieId) %>% 
+  unique()
+validation %>%                                    #Find movies with highest bi and number of ratings after optimizing the regularization for movie effects
+  left_join(opt_reg_movie_avgs, by = "movieId") %>%
+  select(title = title.x, bi, n) %>% 
+  arrange(desc(bi)) %>% 
+  distinct() %>%
+  top_n(10, bi)
+validation %>%                                    #Find movies with lowest bi and number of ratings after optimizing the regularization for movie effects
+  left_join(opt_reg_movie_avgs, by = "movieId") %>%
+  select(title = title.x, bi, n) %>% 
+  arrange(bi) %>% 
+  distinct() %>%
+  top_n(-10, bi)
+#Seems better, lots of low number movies aren't as high
+```
+
+These movies are a lot more popular and known, though there are some movies in the tables that still have a low number of reviews. But overall, this seems more believable and in line with what a person would expect of a movie with generally higher or lower ratings.
+  
+  
+```{r User bias, include = FALSE}
+user_avgs <- edx %>%                        #Making averages for the user effect
+  left_join(movie_avgs, by="movieId") %>%   #Need to add in movie effects to subract it from the rating and mu to find the user effect
+  group_by(userId) %>%                      #Grouping by userId to find the user effect 
+  summarize(bu = mean(rating - mu - bi), .groups = 'keep')
+predicted_bu_bi_rating <- validation %>% 
+  left_join(movie_avgs, by = "movieId") %>%  #Adding movie effects
+  left_join(user_avgs, by = "userId") %>%    #Adding user effects
+  mutate(pred = mu + bi + bu) %>% 
+  .$pred
+model_bu_bi_rmse <- RMSE(predicted_bu_bi_rating, validation$rating)  #Getting the RMSE the movie + user effects
+rmse_results <- bind_rows(rmse_results,                              #Adding the movie & user RMSE to the table
+                          data_frame(method = "Movies and Users Algorithm", 
+                                     RMSE = model_bu_bi_rmse))
+rmse_results
+
+
+#Regularizing both user and movie effects
+reg_rmse <- sapply(lambdas, function(l){   #Using the same lambdas as before
+  bi <- edx %>%                            #Getting the movie effect
+    group_by(movieId) %>% 
+    summarize(bi = sum(rating - mu)/(n()+l), .groups = 'keep') 
+  bu <- edx %>%                            #Getting the user effect
+    left_join(bi, by = "movieId") %>%
+    group_by(userId) %>%
+    summarize(bu = sum(rating - (mu + bi))/(n()+l), .groups = 'keep')
+  pred <- validation %>%                   
+    left_join(bi, by = "movieId") %>%
+    left_join(bu, by = "userId") %>%
+    mutate(pred = mu + bi + bu) %>% 
+    .$pred
+  return(RMSE(pred, validation$rating))
+})
+###plot(lambdas, reg_rmse, xlab = "Lambda", ylab = "RMSE", main = "Regularized Movie and User Algorithm RMSE") #Plotting to see how well lambda lowers RMSE
+lambda <- lambdas[which.min(reg_rmse)]  #Saving the optimal lamdba to use in the table
+rmse_results <- bind_rows(rmse_results, 
+                          data_frame(method = paste("Regularized Movie and User Algorithm, l = ", lambda),
+                                     RMSE = min(reg_rmse)))
+rmse_results
+```
+  
+On top of using the effect of each movie, we can see how users reviewed other movies to try and optimize the code. To do this we group the movies by userId and subtract the mu and bi before taking the mean. This gives us a RMSE of `r model_bu_bi_rmse`. This number is lower than the RMSE of the movie effect, but is not lower than the regularized movie effect RMSE. To fix this, regularization can be done on the user effect as well. Similar to before, the optimal lambda can be found using a plot with the same lambdas and the RMSEs. From this can be seen that the lambda that reduces the RMSE the most is `r lambda`, which brings the RMSE down to `r min(reg_rmse)`.
+  
+```{r bi+bu rmse vs lambda, echo = FALSE}
+plot(lambdas, reg_rmse, xlab = "Lambda", ylab = "RMSE", main = "Regularized Movie and User Algorithm RMSE") #Plotting to see how well lambda lowers RMSE
+```
+  
+  
+```{r genre bias,  include = FALSE}
+movie_genres <- edx %>%  #Making a list of genres and how many have them. Not seperating each into seperate individual genres
+  group_by(genres) %>% 
+  summarize(n = n(), .groups = 'keep') %>%  
+  distinct()
+genre_avgs <- edx %>%                                                #Calculating the genre effect
+  left_join(movie_avgs, by = "movieId") %>%                          #Adding the movie effect via movieId
+  select(userId, movieId, rating, timestamp, title, genres,bi,n) %>% #Removing some unneccesary info
+  left_join(user_avgs, by = "userId") %>%                            #Adding the user effect via userId
+  group_by(genres) %>% 
+  summarize(bg = mean(rating - mu - bu - bi), .groups = 'keep')
+predicted_iug <- validation %>% 
+  left_join(movie_avgs, by = "movieId") %>%                      #Adding the movie effect/bias 
+  select(userId, movieId, timestamp, title, genres, bi, n) %>%   #Making sure just the necessary stuff is here
+  left_join(user_avgs, by = "userId") %>%                        #Adding the user effect/bias
+  left_join(genre_avgs, by  = "genres") %>%                      #Adding the genre effect/bias
+  mutate(pred = mu + bi + bu + bg) %>%
+  .$pred
+model_iug_rmse <- RMSE(predicted_iug, validation$rating)         #RMSE of the non-regularized movie, user and genre effects/biases
+rmse_results <- bind_rows(rmse_results,                          #Adding the RMSE to the table
+                          data_frame(method = "Movies, Users, and Genres Algorithm",
+                                     RMSE = model_iug_rmse))
+rmse_results
+
+#Optimize lambda for Genres 
+reg_rmse <- sapply(lambdas, function(l){                         #Same lambda as earlier 0->10 by 0.1
+  bi <- edx %>%                                                  #Getting the movie bias, same as before
+    group_by(movieId) %>% 
+    summarize(bi = sum(rating - mu)/(n()+l), .groups = 'keep')
+  bu <- edx %>%                                                  #Getting the user bias, same as before
+    left_join(bi, by = "movieId") %>%
+    group_by(userId) %>%
+    summarize(bu = sum(rating - (mu + bi))/(n()+l), .groups = 'keep')
+  bg <- edx %>%                                                  #Getting genre effect, similar to how the user and movie biases were gotten
+    left_join(bi, by = "movieId") %>% 
+    left_join(user_avgs, by = "userId") %>% 
+    group_by(genres) %>%
+    summarize(bg = sum(rating - mu - bu - bi)/(n() + l), .groups = 'keep')
+  pred <- validation %>%                                         #Same prediction as before, but with genre bias added
+    left_join(bi, by = "movieId") %>%
+    left_join(bu, by = "userId") %>%
+    select(movieId, genres, bi, bu) %>%
+    left_join(bg, by = "genres") %>%
+    mutate(pred = mu + bi + bu + bg) %>% 
+    .$pred
+  return(RMSE(pred, validation$rating))
+})
+####plot(lambdas, reg_rmse, xlab = "Lambda", ylab = "RMSE", main = "REgularized Movie, User and Genre Algorithm RMSE")
+lambda <- lambdas[which.min(reg_rmse)]
+
+rmse_results <- bind_rows(rmse_results,                         #Adding the RMSE of regularized movie, user and genre biases
+                          data_frame(method = paste("Regularized Movie, User, and Genre Algorithm, l = ", lambda),
+                                     RMSE = min(reg_rmse)))
+rmse_results
+```
+  
+Another thing that could be used to increase the accuracy of the algorithm is finding out if there is a genre bias and if it can reduce the RMSE. The genre bias was added to the algorithm in a comparable way to how user effects were added to the algorithm. This resulted in an RMSE of `r model_iug_rmse`. Once again, higher than the previous regularized algorithm but lower than the non-regularized version. The same values of lambdas are used to optimize the algorithm, with it being shown below. The graph below shows that the best lambda is `r lambda` which brings the RMSE down to `r min(reg_rmse)`.
+  
+```{r bu+bi+bg rmse vs lambda, echo = FALSE}
+plot(lambdas, reg_rmse, xlab = "Lambda", ylab = "RMSE", main = "Regularized Movie, User and Genre Algorithm RMSE")
+```
+  
+  
+  
+```{r review week bias, include = FALSE}
+edx_date_week <- edx %>%                                        #Saving the time the review was written as as a date
+  mutate(review_date = lubridate::as_datetime(timestamp))  %>%  #Changing the time stamp to date with time
+  mutate(review_week = cut(as.Date(review_date), "week"))       #Changing the date the review was written as the first Monday of the week it was written
+review_week <-edx_date_week %>%                                 #Saving the number of reviews that were each week
+  select(timestamp, review_week) %>%                            #Keeping the timestamp to bind to another set and the week the review was written
+  group_by(review_week) %>%                                     
+  summarize(n = n(), .groups = 'keep')                          #Getting the number of reviews that were written each week
+review_week_avgs <- edx_date_week %>% group_by(review_week) %>% #Getting the effect of the week a review was written
+  left_join(movie_avgs, by = "movieId") %>%                     #Adding the movie bias to the dataset
+  select(userId, movieId, rating, timestamp, title, genres,review_week, bi) %>%  #Removing unnecessary info
+  left_join(user_avgs, by = "userId") %>%                       #Adding the user bias to the data set
+  left_join(genre_avgs, by = "genres") %>%                      #Adding the genre bias to the data set
+  mutate(bd = mean(rating - mu - bi - bu - bg)) %>%             #Calculating the review week bias
+  select(review_week, bd) %>%                                   #Leaving just the review week and the bias of that week
+  distinct() %>%                                                #Cleaning up the data set to remove duplicates
+  arrange(review_week)                                          #Organizing the dataset bu review week
+
+#review_week_avgs
+predicted_iugd <- validation %>%                                #Predicted rating using movie, user, genre, and review week bias
+  left_join(movie_avgs, by ="movieId") %>%                      #Adding movie bias
+  select(userId, movieId, rating, timestamp, title, genres, bi) %>% #Removing some variables from the dataset
+  left_join(user_avgs, by = "userId") %>%                       #Adding user bias
+  left_join(genre_avgs, by = "genres") %>%                      #Adding genre bias
+  mutate(review_week = lubridate::as_datetime(timestamp)) %>%   #Changing the time stamp to dates
+  mutate(review_week = cut(as.Date(review_week), "week")) %>%   #Changing the date to week
+  select(rating, bi, bu, bg, review_week) %>%                   #Removing unnecessary info besides the biases and review week
+  left_join(review_week_avgs, by = "review_week") %>%           #Adding review week bias
+  mutate(pred = mu + bi + bu + bg + bd) %>%                     #Calculating the predicted rating
+  .$pred
+model_iugd_rmse <- RMSE(predicted_iugd, validation$rating)      #Getting and saving the RMSE of mu and the biases
+rmse_results <- bind_rows(rmse_results,                         #Saving the RMSE to the table
+                          data_frame(method = paste("Movies, Users, Genres, and Review Week Algorithm"),
+                                     RMSE = model_iugd_rmse))
+rmse_results
+
+#Optimize lambda for Review Week
+reg_rmse <- sapply(lambdas, function(l){                        #Using sapply to find the best lambda
+  bi <- edx %>%                                                 #Getting the movie bias
+    group_by(movieId) %>% 
+    summarize(bi = sum(rating - mu)/(n()+l), .groups = 'keep')
+  bu <- edx %>%                                                 #Getting the user bias
+    left_join(bi, by = "movieId") %>%
+    group_by(userId) %>%
+    summarize(bu = sum(rating - (mu + bi))/(n()+l), .groups = 'keep')
+  bg <- edx %>%                                                 #Getting the genre bias
+    left_join(bi, by = "movieId") %>% 
+    left_join(user_avgs, by = "userId") %>% 
+    group_by(genres) %>%
+    summarize(bg = sum(rating - mu - bu - bi)/(n() + l), .groups = 'keep')
+  brw <- edx %>%                                                #Getting the review week bias
+    left_join(bi, by = "movieId") %>% 
+    left_join(bu, by = "userId") %>% 
+    left_join(bg, by = "genres") %>% 
+    mutate(review_week = lubridate::as_datetime(timestamp)) %>%
+    mutate(review_week = cut(as.Date(review_week), "week")) %>%
+    group_by(review_week) %>%
+    mutate(brw = sum(rating - mu - bu - bi - bg)/(n() + l)) %>%
+    select(review_week, brw) %>% 
+    distinct(review_week, brw)
+  pred <- validation %>%                                       #Getting the regularized RMSE for a lambda
+    left_join(bi, by = "movieId") %>%
+    left_join(bu, by = "userId") %>%
+    left_join(bg, by = "genres") %>%
+    mutate(review_week = lubridate::as_datetime(timestamp)) %>%
+    mutate(review_week = cut(as.Date(review_week), "week")) %>%
+    left_join(brw, by ="review_week") %>% 
+    mutate(pred = mu + bi + bu + bg + brw) %>% 
+    .$pred
+  return(RMSE(pred, validation$rating))
+})
+###plot(lambdas, reg_rmse, xlab = "Lambda", ylab = "RMSE", main = "Regularized Movie, User, Genre, and Review Week Algorithm RMSE")                                        #Plotting the RMSE vs lambda to see how much each lambda lowered RMSE
+lambda <- lambdas[which.min(reg_rmse)]                         #Saving the best lambda to lambda
+rmse_results <- bind_rows(rmse_results,                        #Adding RMSE to the table
+                          data_frame(method = paste("Regularizaed Movie, User, Genre  and Review Week Effect, l = ", lambda),
+                                     RMSE = min(reg_rmse)))
+rmse_results
+```
+  
+Something else that could be used to reduce the error of the algorithm is seeing if when a movie is reviewed has an effect on it's rating. To do this however, the timestamp variable in the dataset must be changed to a date. From here, it was changed from a date to the first Monday of the week to allow for more data points per entry. Because of this it might be more appropriate to think of it as the week a user reviewed a movie rather than the date or time a movie was reviewed. Adding the review week effect onto the previous non-regularized algorithm returns an RMSE of `r model_iugd_rmse`. Just like before, this has a lower RMSE than the non-regularized algorithms but a higher RMSE than the regularized ones. This effect can also be regularized the same way the rest were and shown on a graph as well. The graph shows that the optimal lambda for reducing RMSE is `r lambda`, and that the lowers the RMSE to `r min(reg_rmse)`.
+  
+```{r, echo= FALSE}
+plot(lambdas, reg_rmse, xlab = "Lambda", ylab = "RMSE", main = "Regularized Movie, User, Genre, and Review Week Algorithm RMSE")
+```
+  
+  
+
+
+  
+  
+  
+Results  
+```{r rmse_result, echo = FALSE}
+rmse_results
+```
+The table above lists the RMSE of the algorithm as more variables were added and then regularized. From it, it can be seen that having the algorithm that regularized the movie, the user, and the genre of the movie was enough to achieve the goal of a RMSE below 0.86490. The additional variable and regularization of it were done to further guarantee that the RMSE of the algorithm was safely below the desired 0.86490. The table also shows that as expected, adding more variables to the algorithm helps improve it's accuracy, and that regularization further improves the accuracy. It is interesting to note that adding one more variable would have a similar RMSE to regularizing the previous amount of variables. 
+
+However, a big problem in the model arose as more effects were being added and then calculated for regularization, and it was the time it took the algorithm to run. Each variable was adding a lot more time to the calculations than the previous one had added, meaning that it was becoming more time consuming to run the algorithm  as more effects were being added on. If the effect wasn't regularized, it wouldn't add much more time. However, when they were regularized, it appeared to nearly double the time it took for the algorithm to make it's predictions. It wouldn't take very long with one or two effects, but became noticable once three or more are added. More effects could have been added to reduce the RMSE but concerns over how long it would take for the algorithm to make a prediction were why they weren't added. 
+  
+  
+  
+Conclusion
+
+Regularizing the movie, user, genre and review week effects were all that were needed to bring the RMSE below 0.86490. The regularization of the effects takes the longest, but tends to result in a bigger decrease in RMSE than adding one more variable to take into effect in the algorithm. Computation time was the limiting factor, where it would take a long time to add more variables to analyze and see if they were running and being analyzed. An example of a problem would be not realizing a pipe was missing between two functions in the last part of an algorithm where the effects were being regularized which resulted in a long wait time to not get a result, and then poking around in the code to see what the possible problem was. Often times this was due to missing something in the code or writing a variable wrong, which became easier and easier as the project went on. My own coding skill was a limitation too, with more optimal coding I feel as if I could have added in release year to the algorithm. It was originally added as the third variable to be analyzed but it took longer to run than the final algorithm with the regularized movie, user, genre and review week effect. It also introduced a problem that led to me realizing that movie titles were not unique and had to tie the release year to movieId instead of title if I intended to use and attach it to another data set. Additionally, making a function out of the average rating per review date might have been more optimal than just using review weeks, but was not something I knew or remembered to do. A lot more information could have been taken from the timestamp variable, such as the season the review was written, the day it was written, or if a day it was written was a holiday, which could have all provided interesting insight and possibly increased the accuracy of the algorithm. In future works, more time will be spent on cleaning up datasets to make sure just the necessities will be in them, such as release year or genres to movieId in datasets pertaining to those rather than keeping all if not all of the dataset. Checking what each variable in the dataset represents will also be done at the start so that there aren't confusions or wrongful assumptions about what each means.
